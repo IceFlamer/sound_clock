@@ -102,57 +102,45 @@ def wav_bytes(signal):
 def infer_time_from_audio(wav_bytes):
     sr, data = read(io.BytesIO(wav_bytes))
     if data.ndim > 1:
-        data = data.mean(axis=1)
-
+        data = data.mean(axis=1).astype(np.float32)
+    
+    # Нормализуем, чтобы избежать переполнения
+    if np.max(np.abs(data)) > 0:
+        data = data / np.max(np.abs(data))
+    
     window = int(BASE_DURATION * sr)
     base_candidates = [55, 110, 220]
+    candidates = []  # список (ошибка, час, минута)
 
-    hour_candidates = []
-    minute_candidates = []
-
-    for i in range(0, len(data) - window, window):
-        chunk = data[i:i + window]
-
-        spectrum = np.abs(rfft(chunk))
-        freqs = rfftfreq(len(chunk), 1 / sr)
-
-        peak_freq = freqs[np.argmax(spectrum)]
-
-        best_error = np.inf
-        best_hour = None
-        best_minute = None
-
-        for base in base_candidates:
-            # восстановление часа
-            hour = round(12 * np.log2(peak_freq / base))
-            if not (0 <= hour <= 23):
-                continue
-
-            f_hour = base * 2**(hour / 12)
-            minute = round((peak_freq / f_hour - 1) * 60)
-
-            if not (0 <= minute <= 59):
-                continue
-
-            recon_freq = f_hour * (1 + minute / 60)
-            error = abs(recon_freq - peak_freq)
-
-            if error < best_error:
-                best_error = error
-                best_hour = hour
-                best_minute = minute
-
-        if best_hour is not None:
-            hour_candidates.append(best_hour)
-            minute_candidates.append(best_minute)
-
-    if not hour_candidates:
+    # Анализируем первый фрагмент (обычно его достаточно)
+    chunk = data[:window]
+    if len(chunk) < window:
         return None
 
-    hour = int(np.median(hour_candidates))
-    minute = int(np.median(minute_candidates))
+    spectrum = np.abs(rfft(chunk))
+    freqs = rfftfreq(len(chunk), 1 / sr)
+    peak_idx = np.argmax(spectrum)
+    peak_freq = freqs[peak_idx]
 
-    return hour, minute
+    # Перебираем все возможные base и часы
+    for base in base_candidates:
+        for hour in range(24):
+            f_hour = base * (2 ** (hour / 12))
+            # Ожидаемая частота минутного тона
+            for minute in range(60):
+                f_min_expected = f_hour * (1 + minute / 60)
+                error = abs(f_min_expected - peak_freq)
+                # Добавляем кандидата с малой ошибкой
+                if error < 10:  # допуск ±10 Гц — можно настроить
+                    candidates.append((error, hour, minute))
+
+    if not candidates:
+        return None
+
+    # Выбираем кандидата с минимальной ошибкой
+    candidates.sort()
+    _, best_hour, best_minute = candidates[0]
+    return int(best_hour), int(best_minute)
 
 
 
@@ -207,12 +195,15 @@ elif mode == "Запись диапазона":
 # ===============================
 else:
     uploaded = st.file_uploader("Загрузите WAV файл", type=["wav"])
-
     if uploaded:
-        hour, minute = infer_time_from_audio(uploaded.read())
-        st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
+        result = infer_time_from_audio(uploaded.read())
+        if result is not None:
+            hour, minute = result
+            st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
+        else:
+            st.error("❌ Не удалось распознать время. Убедитесь, что файл создан этим приложением.")
+        st.divider()
+        st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
 
-st.divider()
-st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
 
 
