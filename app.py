@@ -93,16 +93,16 @@ def wav_bytes(signal):
 # ===============================
 # ОБРАТНЫЙ АНАЛИЗ — ИСПРАВЛЕННЫЙ И НАДЁЖНЫЙ
 # ===============================
-def infer_time_from_audio(wav_bytes_data):
-    sr, data = read(io.BytesIO(wav_bytes_data))
+def infer_time_from_audio(wav_bytes):
+    sr, data = read(io.BytesIO(wav_bytes))
     if data.ndim > 1:
         data = data.mean(axis=1).astype(np.float32)
-
+    
     window = int(BASE_DURATION * sr)
     if len(data) < window:
         return None
-
-    # Анализируем ТОЛЬКО первый блок (его достаточно)
+        
+    # Берём ТОЛЬКО первый сегмент — его достаточно
     chunk = data[:window]
     spectrum = np.abs(rfft(chunk))
     freqs = rfftfreq(len(chunk), 1 / sr)
@@ -112,7 +112,7 @@ def infer_time_from_audio(wav_bytes_data):
     best_hour = None
     best_minute = None
 
-    # Перебираем ВСЕ возможные времена (00:00 – 23:59)
+    # Перебираем ВСЕ возможные времена — 24*60 = 1440 вариантов
     for hour in range(24):
         wave_type, base = instrument_for_hour(hour)
         f_hour = base * (2 ** (hour / 12))
@@ -124,7 +124,7 @@ def infer_time_from_audio(wav_bytes_data):
                 best_hour = hour
                 best_minute = minute
 
-    # Допуск: если ошибка > 6 Гц — считаем, что не распознано
+    # Допуск: 6 Гц — достаточно для надёжности при BASE_DURATION=0.8
     if best_error > 6.0 or best_hour is None:
         return None
 
@@ -165,10 +165,11 @@ else:  # Обратный анализ
     uploaded = st.file_uploader("Загрузите WAV файл", type=["wav"])
     if uploaded:
         result = infer_time_from_audio(uploaded.read())
-        if result is not None:
-            hour, minute = result
-            st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
-        else:
-            st.error("❌ Не удалось распознать время. Убедитесь, что файл был создан этим приложением.")
+            if result is not None:
+                hour, minute = result
+                st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
+            else:
+                st.error("❌ Не удалось распознать время.")
         st.divider()
         st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
+
