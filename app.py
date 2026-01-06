@@ -50,7 +50,7 @@ def waveform(freq, duration, wave_type):
         w = 2 * (t * freq - np.floor(t * freq + 0.5))
     else:
         w = np.sin(2 * np.pi * freq * t)
-    
+
     # Envelope
     attack = min(int(0.05 * SAMPLE_RATE), n // 2)
     decay = min(int(0.25 * SAMPLE_RATE), n // 2)
@@ -62,7 +62,7 @@ def waveform(freq, duration, wave_type):
     return w * env
 
 # ===============================
-# ГЕНЕРАЦИЯ ЗВУКА (БЕЗ ИЗМЕНЕНИЙ — ВАША СХЕМА)
+# ГЕНЕРАЦИЯ ЗВУКА
 # ===============================
 def sound_for_time(t: time):
     h, m, s = t.hour, t.minute, t.second
@@ -73,11 +73,10 @@ def sound_for_time(t: time):
 
     main = waveform(f_hour, BASE_DURATION, wave_type)
     interval = waveform(f_min, BASE_DURATION, "sine") * 0.6
-
     pulse = 0.4 if s % 2 == 0 else 0.2
     tick = waveform(f_sec, 0.12, "square") * pulse
-    tick = np.pad(tick, (0, len(main) - len(tick)), constant_values=0)
-
+    # Исправление: используем mode='constant' вместо constant_values (более совместимо)
+    tick = np.pad(tick, (0, len(main) - len(tick)), mode='constant')
     signal = main + interval + tick
     signal = signal / (np.max(np.abs(signal)) + 1e-8)
     return signal.astype(np.float32)
@@ -87,22 +86,27 @@ def sound_for_time(t: time):
 # ===============================
 def wav_bytes(signal):
     buf = io.BytesIO()
-    write(buf, SAMPLE_RATE, signal)
+    # Убедимся, что сигнал в диапазоне [-1, 1] и конвертируем в int16
+    signal_int16 = np.int16(signal * 32767)
+    write(buf, SAMPLE_RATE, signal_int16)
     return buf.getvalue()
 
 # ===============================
-# ОБРАТНЫЙ АНАЛИЗ — ИСПРАВЛЕННЫЙ И НАДЁЖНЫЙ
+# ОБРАТНЫЙ АНАЛИЗ — ИСПРАВЛЕННЫЙ
 # ===============================
 def infer_time_from_audio(wav_bytes):
     sr, data = read(io.BytesIO(wav_bytes))
+    # Поддержка стерео → моно
     if data.ndim > 1:
-        data = data.mean(axis=1).astype(np.float32)
-    
+        data = data.mean(axis=1)
+    # Нормализация в float32
+    if data.dtype != np.float32:
+        data = data.astype(np.float32) / 32767.0
+
     window = int(BASE_DURATION * sr)
     if len(data) < window:
         return None
-        
-    # Берём ТОЛЬКО первый сегмент — его достаточно
+
     chunk = data[:window]
     spectrum = np.abs(rfft(chunk))
     freqs = rfftfreq(len(chunk), 1 / sr)
@@ -112,7 +116,6 @@ def infer_time_from_audio(wav_bytes):
     best_hour = None
     best_minute = None
 
-    # Перебираем ВСЕ возможные времена — 24*60 = 1440 вариантов
     for hour in range(24):
         wave_type, base = instrument_for_hour(hour)
         f_hour = base * (2 ** (hour / 12))
@@ -124,7 +127,7 @@ def infer_time_from_audio(wav_bytes):
                 best_hour = hour
                 best_minute = minute
 
-    # Допуск: 6 Гц — достаточно для надёжности при BASE_DURATION=0.8
+    # Допуск 6 Гц при длительности 0.8 сек (~1.25 Гц разрешение FFT → 6 Гц = ~5 бинов)
     if best_error > 6.0 or best_hour is None:
         return None
 
@@ -146,9 +149,9 @@ if mode == "Одно время":
         st.audio(wav_bytes(signal), format="audio/wav")
 
 elif mode == "Запись диапазона":
-    t1 = st.time_input("Начало", time(12, 0, 0))
-    t2 = st.time_input("Конец", time(12, 1, 0))
-    step = st.number_input("Шаг (сек)", 1, 10, 1)
+    t1 = st.time_input("Начало", value=time(12, 0, 0))
+    t2 = st.time_input("Конец", value=time(12, 1, 0))
+    step = st.number_input("Шаг (сек)", min_value=1, max_value=10, value=1)
     if st.button("⏺ Создать запись"):
         cur = datetime.combine(date.today(), t1)
         end = datetime.combine(date.today(), t2)
@@ -159,17 +162,17 @@ elif mode == "Запись диапазона":
         full = np.concatenate(chunks)
         audio = wav_bytes(full)
         st.audio(audio, format="audio/wav")
-        st.download_button("⬇️ Скачать WAV", audio, "time_recording.wav")
+        st.download_button("⬇️ Скачать WAV", audio, "time_recording.wav", mime="audio/wav")
 
 else:  # Обратный анализ
     uploaded = st.file_uploader("Загрузите WAV файл", type=["wav"])
     if uploaded:
         result = infer_time_from_audio(uploaded.read())
-            if result is not None:
-                hour, minute = result
-                st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
-            else:
-                st.error("❌ Не удалось распознать время.")
-        st.divider()
-        st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
+        if result is not None:
+            hour, minute = result
+            st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
+        else:
+            st.error("❌ Не удалось распознать время.")
 
+st.divider()
+st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
