@@ -96,13 +96,8 @@ def wav_bytes(signal):
 # ===============================
 def infer_time_from_audio(wav_bytes):
     sr, data = read(io.BytesIO(wav_bytes))
-    # Поддержка стерео → моно
     if data.ndim > 1:
-        data = data.mean(axis=1)
-    # Нормализация в float32
-    if data.dtype != np.float32:
-        data = data.astype(np.float32) / 32767.0
-
+        data = data.mean(axis=1).astype(np.float32)
     window = int(BASE_DURATION * sr)
     if len(data) < window:
         return None
@@ -110,28 +105,41 @@ def infer_time_from_audio(wav_bytes):
     chunk = data[:window]
     spectrum = np.abs(rfft(chunk))
     freqs = rfftfreq(len(chunk), 1 / sr)
-    peak_freq = freqs[np.argmax(spectrum)]
+
+    # Найдём ТОП-3 пика (чтобы захватить main + interval)
+    peak_indices = np.argsort(spectrum)[-3:][::-1]
+    peak_freqs = freqs[peak_indices]
+    # Оставим только положительные и разумные (<2000 Гц)
+    peak_freqs = [f for f in peak_freqs if 20 <= f <= 2000]
+    if len(peak_freqs) < 2:
+        return None
+
+    # Отсортируем: меньшая частота — час, большая — минуты
+    f1, f2 = sorted(peak_freqs[:2])
 
     best_error = float('inf')
-    best_hour = None
-    best_minute = None
+    best_time = None
 
     for hour in range(24):
         wave_type, base = instrument_for_hour(hour)
-        f_hour = base * (2 ** (hour / 12))
+        f_hour_expected = base * (2 ** (hour / 12))
         for minute in range(60):
-            f_min_expected = f_hour * (1 + minute / 60)
-            error = abs(f_min_expected - peak_freq)
-            if error < best_error:
-                best_error = error
-                best_hour = hour
-                best_minute = minute
+            f_min_expected = f_hour_expected * (1 + minute / 60)
 
-    # Допуск 6 Гц при длительности 0.8 сек (~1.25 Гц разрешение FFT → 6 Гц = ~5 бинов)
-    if best_error > 6.0 or best_hour is None:
+            # Ошибка по двум частотам
+            err1 = abs(f1 - f_hour_expected)
+            err2 = abs(f2 - f_min_expected)
+            total_err = err1 + err2
+
+            if total_err < best_error:
+                best_error = total_err
+                best_time = (hour, minute)
+
+    # Суммарная ошибка допустима до 12 Гц (6+6)
+    if best_time is None or best_error > 12.0:
         return None
 
-    return int(best_hour), int(best_minute)
+    return best_time
 
 # ===============================
 # ИНТЕРФЕЙС
@@ -176,3 +184,4 @@ else:  # Обратный анализ
 
 st.divider()
 st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
+
