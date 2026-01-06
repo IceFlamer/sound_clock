@@ -63,12 +63,12 @@ def sound_for_time(t: time):
     tone_h = waveform(f_hour, BASE_DURATION, "sine") * 0.7
     tone_m = waveform(f_min, BASE_DURATION, "sine") * 0.5
 
-    # СЕКУНДЫ: ритм — (s % 4) + 1 тиков
+    # СЕКУНДЫ: тик на 880 Гц, количество = (s % 4) + 1
     num_ticks = (s % 4) + 1
     tick_signal = np.zeros_like(tone_h)
     for i in range(num_ticks):
         tick = waveform(880, 0.06, "square") * 0.3
-        start = int(i * 0.15 * SAMPLE_RATE)
+        start = int(i * 0.12 * SAMPLE_RATE)
         end = start + len(tick)
         if end <= len(tick_signal):
             tick_signal[start:end] += tick
@@ -92,48 +92,55 @@ def infer_time_from_audio(wav_bytes_data):
     sr, data = read(io.BytesIO(wav_bytes_data))
     if data.ndim > 1:
         data = data.mean(axis=1).astype(np.float32)
-    
     window = int(BASE_DURATION * sr)
     if len(data) < window:
         return None
-    chunk = data[:window]  # достаточно первого сегмента
+    chunk = data[:window]
 
-    # Спектр
     spectrum = np.abs(rfft(chunk))
     freqs = rfftfreq(len(chunk), 1 / sr)
 
-    # Найдём ТОП-2 пика (игнорируем очень низкие частоты)
-    # Уберём всё ниже 50 Гц
+    # Отсекаем низкие частоты (< 50 Гц)
     valid = freqs >= 50
     spectrum = spectrum[valid]
     freqs = freqs[valid]
 
-    # Находим два самых сильных пика
-    peak_indices = np.argsort(spectrum)[-2:][::-1]  # два самых больших
-    peak_freqs = freqs[peak_indices]
+    # Находим ТОП-3 пика (на случай, если тик или шум добавил лишнее)
+    top_indices = np.argsort(spectrum)[-3:][::-1]
+    top_freqs = freqs[top_indices]
 
-    # Сортируем по частоте: нижняя — час, верхняя — минуты (обычно)
-    f1, f2 = sorted(peak_freqs[:2])
-    candidates = []
+    # Берём два самых сильных, сортируем по частоте
+    freq_pairs = []
+    for i in range(len(top_freqs)):
+        for j in range(i+1, len(top_freqs)):
+            f_low, f_high = sorted([top_freqs[i], top_freqs[j]])
+            freq_pairs.append((f_low, f_high))
+
+    if not freq_pairs:
+        return None
+
+    best_error = float('inf')
+    best_h, best_m = None, None
 
     # Перебираем все возможные времена
     for hour in range(24):
         for minute in range(60):
-            f_h_expected = BASE_NOTE * (2 ** (hour / 12))
-            f_m_expected = BASE_NOTE * (2 ** ((minute // 5) % 12 / 12))
-            # Сравниваем с двумя пиками
-            err1 = abs(f1 - f_h_expected) + abs(f2 - f_m_expected)
-            err2 = abs(f1 - f_m_expected) + abs(f2 - f_h_expected)  # на случай перепутанных
-            error = min(err1, err2)
-            if error < 30:  # допуск ±15 Гц на каждый
-                candidates.append((error, hour, minute))
+            f_h = BASE_NOTE * (2 ** (hour / 12))
+            f_m = BASE_NOTE * (2 ** ((minute // 5) % 12 / 12))
+            for f1, f2 in freq_pairs:
+                # Вариант 1: f1=час, f2=минуты
+                err1 = abs(f1 - f_h) + abs(f2 - f_m)
+                # Вариант 2: наоборот
+                err2 = abs(f1 - f_m) + abs(f2 - f_h)
+                err = min(err1, err2)
+                if err < best_error:
+                    best_error = err
+                    best_h, best_m = hour, minute
 
-    if not candidates:
+    if best_error > 40 or best_h is None:  # допуск ~20 Гц на тон
         return None
 
-    candidates.sort()
-    _, best_hour, best_minute = candidates[0]
-    return int(best_hour), int(best_minute)
+    return best_h, best_m
 
 # ===============================
 # UI
@@ -179,3 +186,4 @@ else:
             st.error("❌ Не удалось распознать время. Убедитесь, что файл создан этим приложением.")
         st.divider()
         st.caption("⚠️ Обратное определение времени — на основе двух пиков и перебора")
+
