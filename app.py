@@ -1,115 +1,164 @@
 import streamlit as st
 import numpy as np
-from datetime import datetime
+from datetime import datetime, date, time, timedelta
 import plotly.graph_objects as go
 import io
 from scipy.io.wavfile import write
 
-# -------------------------------
-# НАСТРОЙКА СТРАНИЦЫ
-# -------------------------------
-st.set_page_config(
-    page_title="Звуковые часы",
-    page_icon="🎵",
-    layout="wide"
-)
+# ===============================
+# НАСТРОЙКА
+# ===============================
+st.set_page_config("🎵 Звуковые часы", "🎵", layout="wide")
 
-# -------------------------------
-# ГЕНЕРАЦИЯ ЗВУКА
-# -------------------------------
 SAMPLE_RATE = 44100
+BASE_DURATION = 0.8
 
-def waveform(freq, duration=1.0, wave_type="sine"):
+# ===============================
+# ИНСТРУМЕНТЫ ПО ЧАСАМ
+# ===============================
+HOUR_INSTRUMENTS = {
+    range(0, 6):  ("sine",  55),   # ночь
+    range(6, 12): ("triangle",110),# утро
+    range(12,18): ("square", 220), # день
+    range(18,24): ("sawtooth",110) # вечер
+}
+
+def instrument_for_hour(hour):
+    for r, inst in HOUR_INSTRUMENTS.items():
+        if hour in r:
+            return inst
+    return "sine", 110
+
+# ===============================
+# ВОЛНЫ
+# ===============================
+def waveform(freq, duration, wave_type):
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
 
     if wave_type == "sine":
-        wave = np.sin(2 * np.pi * freq * t)
+        w = np.sin(2*np.pi*freq*t)
     elif wave_type == "square":
-        wave = np.sign(np.sin(2 * np.pi * freq * t))
+        w = np.sign(np.sin(2*np.pi*freq*t))
     elif wave_type == "triangle":
-        wave = 2 * np.abs(2 * (t * freq - np.floor(t * freq + 0.5))) - 1
+        w = 2*np.abs(2*(t*freq-np.floor(t*freq+0.5)))-1
     elif wave_type == "sawtooth":
-        wave = 2 * (t * freq - np.floor(t * freq + 0.5))
+        w = 2*(t*freq-np.floor(t*freq+0.5))
     else:
-        wave = np.sin(2 * np.pi * freq * t)
+        w = np.sin(2*np.pi*freq*t)
 
     # envelope
-    env = np.ones_like(wave)
-    a = int(0.05 * SAMPLE_RATE)
-    d = int(0.2 * SAMPLE_RATE)
-    env[:a] = np.linspace(0, 1, a)
-    env[-d:] = np.linspace(1, 0, d)
+    a = int(0.05*SAMPLE_RATE)
+    d = int(0.25*SAMPLE_RATE)
+    env = np.ones_like(w)
+    env[:a] = np.linspace(0,1,a)
+    env[-d:] = np.linspace(1,0,d)
 
-    return wave * env
+    return w*env
 
+# ===============================
+# ЗВУК ДЛЯ ВРЕМЕНИ (ПОЛИФОНИЯ)
+# ===============================
+def sound_for_time(t: time):
+    hour, minute, second = t.hour, t.minute, t.second
 
-def sound_for_time():
-    now = datetime.now()
-    hour = now.hour
-    minute = now.minute
+    wave_type, base = instrument_for_hour(hour)
 
-    base_freq = 110 * 2 ** (hour / 12)
-    freq = base_freq * (1 + minute / 60)
+    # Ноты
+    f_hour = base * 2**(hour/12)
+    f_min  = f_hour * (1 + minute/60)
+    f_sec  = f_hour * 4
 
-    wave = waveform(freq, 1.2, "sine")
+    main = waveform(f_hour, BASE_DURATION, wave_type)
+    interval = waveform(f_min, BASE_DURATION, "sine") * 0.6
 
-    # гармоники
-    for i in range(2, 5):
-        wave += 0.2 / i * waveform(freq * i, 1.2)
+    # секундный тик
+    pulse = 0.4 if second % 2 == 0 else 0.2
+    tick = waveform(f_sec, 0.12, "square") * pulse
+    tick = np.pad(tick, (0, len(main)-len(tick)))
 
-    wave /= np.max(np.abs(wave))
-    return wave.astype(np.float32), freq, now.strftime("%H:%M:%S")
+    signal = main + interval + tick
+    signal /= np.max(np.abs(signal))
 
+    return signal.astype(np.float32)
 
+# ===============================
+# WAV В ПАМЯТИ
+# ===============================
 def wav_bytes(signal):
-    buffer = io.BytesIO()
-    write(buffer, SAMPLE_RATE, signal)
-    return buffer.getvalue()
+    buf = io.BytesIO()
+    write(buf, SAMPLE_RATE, signal)
+    return buf.getvalue()
 
-# -------------------------------
+# ===============================
 # UI
-# -------------------------------
-st.markdown(
-    "<h1 style='text-align:center'>🎵 Звуковые часы</h1>",
-    unsafe_allow_html=True
-)
-
-signal, freq, time_str = sound_for_time()
-
-col1, col2 = st.columns([1, 2])
-
-with col1:
-    st.subheader("⏰ Текущее время")
-    st.markdown(f"""
-    <div style="
-        font-size:3rem;
-        background:#111;
-        padding:1rem;
-        border-radius:12px;
-        text-align:center">
-        {time_str}
-    </div>
-    """, unsafe_allow_html=True)
-
-    if st.button("▶️ Проиграть звук"):
-        st.audio(wav_bytes(signal), format="audio/wav")
-
-    st.caption(f"Частота: **{freq:.1f} Гц**")
-
-with col2:
-    t = np.linspace(0, 1.2, len(signal))
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=t[:600],
-        y=signal[:600],
-        mode="lines"
-    ))
-    fig.update_layout(
-        title="Звуковая волна",
-        template="plotly_dark",
-        height=300
-    )
-    st.plotly_chart(fig, use_container_width=True)
+# ===============================
+st.title("🎵 Оркестр времени")
+st.caption("Часы, минуты и секунды как музыка")
 
 st.divider()
-st.caption("🔊 Звук воспроизводится напрямую в браузере через WAV")
+
+# -------- РЕЖИМ --------
+mode = st.radio("Режим:", ["Одно время", "Запись диапазона"], horizontal=True)
+
+# ===============================
+# ОДНО ВРЕМЯ
+# ===============================
+if mode == "Одно время":
+    selected = st.time_input("Выберите время", datetime.now().time())
+
+    signal = sound_for_time(selected)
+
+    col1, col2 = st.columns([1,2])
+
+    with col1:
+        st.markdown(
+            f"<div style='font-size:2.5rem;text-align:center'>{selected.strftime('%H:%M:%S')}</div>",
+            unsafe_allow_html=True
+        )
+        if st.button("▶️ Проиграть"):
+            st.audio(wav_bytes(signal), format="audio/wav")
+
+    with col2:
+        t = np.linspace(0, BASE_DURATION, len(signal))
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=t[:500], y=signal[:500], mode="lines"))
+        fig.update_layout(template="plotly_dark", height=300)
+        st.plotly_chart(fig, use_container_width=True)
+
+# ===============================
+# ЗАПИСЬ ДИАПАЗОНА
+# ===============================
+else:
+    st.subheader("🎙 Запись временного диапазона")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        t_start = st.time_input("Начало", time(12,0,0))
+    with c2:
+        t_end = st.time_input("Конец", time(12,1,0))
+    with c3:
+        step = st.number_input("Шаг (сек)", 1, 10, 1)
+
+    if st.button("⏺ Создать запись"):
+        cur = datetime.combine(date.today(), t_start)
+        end = datetime.combine(date.today(), t_end)
+
+        chunks = []
+        while cur <= end:
+            chunks.append(sound_for_time(cur.time()))
+            cur += timedelta(seconds=step)
+
+        full = np.concatenate(chunks)
+        audio = wav_bytes(full)
+
+        st.success("Запись готова")
+        st.audio(audio, format="audio/wav")
+        st.download_button(
+            "⬇️ Скачать WAV",
+            audio,
+            file_name="time_recording.wav",
+            mime="audio/wav"
+        )
+
+st.divider()
+st.caption("🔊 Полифония: часы + минуты + секунды • Инструменты по времени суток")
