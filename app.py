@@ -104,16 +104,56 @@ def infer_time_from_audio(wav_bytes):
     if data.ndim > 1:
         data = data.mean(axis=1)
 
-    spectrum = np.abs(rfft(data))
-    freqs = rfftfreq(len(data), 1/sr)
+    window = int(BASE_DURATION * sr)
+    base_candidates = [55, 110, 220]
 
-    peak_freq = freqs[np.argmax(spectrum)]
+    hour_candidates = []
+    minute_candidates = []
 
-    # восстановление часа (грубо)
-    hour = int(round(12 * np.log2(peak_freq / 110))) % 24
-    minute = int(abs((peak_freq / (110 * 2**(hour/12)) - 1) * 60))
+    for i in range(0, len(data) - window, window):
+        chunk = data[i:i + window]
 
-    return hour, max(0, min(minute, 59))
+        spectrum = np.abs(rfft(chunk))
+        freqs = rfftfreq(len(chunk), 1 / sr)
+
+        peak_freq = freqs[np.argmax(spectrum)]
+
+        best_error = np.inf
+        best_hour = None
+        best_minute = None
+
+        for base in base_candidates:
+            # восстановление часа
+            hour = round(12 * np.log2(peak_freq / base))
+            if not (0 <= hour <= 23):
+                continue
+
+            f_hour = base * 2**(hour / 12)
+            minute = round((peak_freq / f_hour - 1) * 60)
+
+            if not (0 <= minute <= 59):
+                continue
+
+            recon_freq = f_hour * (1 + minute / 60)
+            error = abs(recon_freq - peak_freq)
+
+            if error < best_error:
+                best_error = error
+                best_hour = hour
+                best_minute = minute
+
+        if best_hour is not None:
+            hour_candidates.append(best_hour)
+            minute_candidates.append(best_minute)
+
+    if not hour_candidates:
+        return None
+
+    hour = int(np.median(hour_candidates))
+    minute = int(np.median(minute_candidates))
+
+    return hour, minute
+
 
 # ===============================
 # UI
@@ -173,3 +213,4 @@ else:
 
 st.divider()
 st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
+
