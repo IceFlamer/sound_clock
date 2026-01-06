@@ -34,6 +34,7 @@ def instrument_for_hour(hour):
 # ===============================
 def waveform(freq, duration, wave_type):
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
+    n = len(t)
 
     if wave_type == "sine":
         w = np.sin(2*np.pi*freq*t)
@@ -46,14 +47,18 @@ def waveform(freq, duration, wave_type):
     else:
         w = np.sin(2*np.pi*freq*t)
 
-    # envelope
-    a = int(0.05*SAMPLE_RATE)
-    d = int(0.25*SAMPLE_RATE)
-    env = np.ones_like(w)
-    env[:a] = np.linspace(0,1,a)
-    env[-d:] = np.linspace(1,0,d)
+    # envelope — БЕЗОПАСНЫЙ
+    attack = min(int(0.05 * SAMPLE_RATE), n // 2)
+    decay  = min(int(0.25 * SAMPLE_RATE), n // 2)
 
-    return w*env
+    env = np.ones(n)
+    if attack > 0:
+        env[:attack] = np.linspace(0, 1, attack)
+    if decay > 0:
+        env[-decay:] = np.linspace(1, 0, decay)
+
+    return w * env
+
 
 # ===============================
 # ЗВУК ДЛЯ ВРЕМЕНИ (ПОЛИФОНИЯ)
