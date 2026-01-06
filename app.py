@@ -155,6 +155,7 @@ def infer_time_from_audio(wav_bytes):
     return hour, minute
 
 
+
 # ===============================
 # UI
 # ===============================
@@ -213,4 +214,5 @@ else:
 
 st.divider()
 st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
+
 
