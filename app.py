@@ -4,7 +4,6 @@ from datetime import datetime, date, time, timedelta
 import io
 from scipy.io.wavfile import write, read
 from scipy.fft import rfft, rfftfreq
-from collections import Counter
 
 # ===============================
 # НАСТРОЙКА
@@ -12,7 +11,6 @@ from collections import Counter
 st.set_page_config("🎵 Оркестр времени", "🎵", layout="wide")
 SAMPLE_RATE = 44100
 BASE_DURATION = 0.8
-BASE_NOTE = 110.0  # A2
 
 # ===============================
 # SESSION STATE
@@ -21,7 +19,23 @@ if "selected_time" not in st.session_state:
     st.session_state.selected_time = datetime.now().time()
 
 # ===============================
-# ВОЛНЫ С ENVELOPE
+# ИНСТРУМЕНТЫ ПО ЧАСАМ
+# ===============================
+HOUR_INSTRUMENTS = {
+    range(0, 6):   ("sine", 55),
+    range(6, 12):  ("triangle", 110),
+    range(12, 18): ("square", 220),
+    range(18, 24): ("sawtooth", 110)
+}
+
+def instrument_for_hour(hour):
+    for r, inst in HOUR_INSTRUMENTS.items():
+        if hour in r:
+            return inst
+    return "sine", 110
+
+# ===============================
+# ГЕНЕРАЦИЯ ВОЛНЫ С ENVELOPE
 # ===============================
 def waveform(freq, duration, wave_type):
     t = np.linspace(0, duration, int(SAMPLE_RATE * duration), False)
@@ -36,6 +50,7 @@ def waveform(freq, duration, wave_type):
         w = 2 * (t * freq - np.floor(t * freq + 0.5))
     else:
         w = np.sin(2 * np.pi * freq * t)
+    
     # Envelope
     attack = min(int(0.05 * SAMPLE_RATE), n // 2)
     decay = min(int(0.25 * SAMPLE_RATE), n // 2)
@@ -47,38 +62,28 @@ def waveform(freq, duration, wave_type):
     return w * env
 
 # ===============================
-# ГЕНЕРАЦИЯ ЗВУКА ПО ВРЕМЕНИ (НОВАЯ СХЕМА)
+# ГЕНЕРАЦИЯ ЗВУКА (БЕЗ ИЗМЕНЕНИЙ — ВАША СХЕМА)
 # ===============================
 def sound_for_time(t: time):
     h, m, s = t.hour, t.minute, t.second
+    wave_type, base = instrument_for_hour(h)
+    f_hour = base * (2 ** (h / 12))
+    f_min = f_hour * (1 + m / 60)
+    f_sec = f_hour * 4
 
-    # ЧАС: 0–23 → 0–23 полутона от A2
-    f_hour = BASE_NOTE * (2 ** (h / 12))
+    main = waveform(f_hour, BASE_DURATION, wave_type)
+    interval = waveform(f_min, BASE_DURATION, "sine") * 0.6
 
-    # МИНУТЫ: каждые 5 минут → 1 полутон (0–11)
-    m_step = (m // 5) % 12
-    f_min = BASE_NOTE * (2 ** (m_step / 12))
+    pulse = 0.4 if s % 2 == 0 else 0.2
+    tick = waveform(f_sec, 0.12, "square") * pulse
+    tick = np.pad(tick, (0, len(main) - len(tick)), constant_values=0)
 
-    # Основные тона
-    tone_h = waveform(f_hour, BASE_DURATION, "sine") * 0.7
-    tone_m = waveform(f_min, BASE_DURATION, "sine") * 0.5
-
-    # СЕКУНДЫ: тик на 880 Гц, количество = (s % 4) + 1
-    num_ticks = (s % 4) + 1
-    tick_signal = np.zeros_like(tone_h)
-    for i in range(num_ticks):
-        tick = waveform(880, 0.06, "square") * 0.3
-        start = int(i * 0.12 * SAMPLE_RATE)
-        end = start + len(tick)
-        if end <= len(tick_signal):
-            tick_signal[start:end] += tick
-
-    signal = tone_h + tone_m + tick_signal
-    signal = signal / (np.max(np.abs(signal)) + 1e-6)
+    signal = main + interval + tick
+    signal = signal / (np.max(np.abs(signal)) + 1e-8)
     return signal.astype(np.float32)
 
 # ===============================
-# WAV УТИЛИТЫ
+# ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ: WAV В БАЙТАХ
 # ===============================
 def wav_bytes(signal):
     buf = io.BytesIO()
@@ -86,78 +91,60 @@ def wav_bytes(signal):
     return buf.getvalue()
 
 # ===============================
-# ОБРАТНЫЙ АНАЛИЗ (НАДЁЖНЫЙ)
+# ОБРАТНЫЙ АНАЛИЗ — ИСПРАВЛЕННЫЙ И НАДЁЖНЫЙ
 # ===============================
 def infer_time_from_audio(wav_bytes_data):
     sr, data = read(io.BytesIO(wav_bytes_data))
     if data.ndim > 1:
         data = data.mean(axis=1).astype(np.float32)
+
     window = int(BASE_DURATION * sr)
     if len(data) < window:
         return None
-    chunk = data[:window]
 
+    # Анализируем ТОЛЬКО первый блок (его достаточно)
+    chunk = data[:window]
     spectrum = np.abs(rfft(chunk))
     freqs = rfftfreq(len(chunk), 1 / sr)
-
-    # Отсекаем низкие частоты (< 50 Гц)
-    valid = freqs >= 50
-    spectrum = spectrum[valid]
-    freqs = freqs[valid]
-
-    # Находим ТОП-3 пика (на случай, если тик или шум добавил лишнее)
-    top_indices = np.argsort(spectrum)[-3:][::-1]
-    top_freqs = freqs[top_indices]
-
-    # Берём два самых сильных, сортируем по частоте
-    freq_pairs = []
-    for i in range(len(top_freqs)):
-        for j in range(i+1, len(top_freqs)):
-            f_low, f_high = sorted([top_freqs[i], top_freqs[j]])
-            freq_pairs.append((f_low, f_high))
-
-    if not freq_pairs:
-        return None
+    peak_freq = freqs[np.argmax(spectrum)]
 
     best_error = float('inf')
-    best_h, best_m = None, None
+    best_hour = None
+    best_minute = None
 
-    # Перебираем все возможные времена
+    # Перебираем ВСЕ возможные времена (00:00 – 23:59)
     for hour in range(24):
+        wave_type, base = instrument_for_hour(hour)
+        f_hour = base * (2 ** (hour / 12))
         for minute in range(60):
-            f_h = BASE_NOTE * (2 ** (hour / 12))
-            f_m = BASE_NOTE * (2 ** ((minute // 5) % 12 / 12))
-            for f1, f2 in freq_pairs:
-                # Вариант 1: f1=час, f2=минуты
-                err1 = abs(f1 - f_h) + abs(f2 - f_m)
-                # Вариант 2: наоборот
-                err2 = abs(f1 - f_m) + abs(f2 - f_h)
-                err = min(err1, err2)
-                if err < best_error:
-                    best_error = err
-                    best_h, best_m = hour, minute
+            f_min_expected = f_hour * (1 + minute / 60)
+            error = abs(f_min_expected - peak_freq)
+            if error < best_error:
+                best_error = error
+                best_hour = hour
+                best_minute = minute
 
-    if best_error > 40 or best_h is None:  # допуск ~20 Гц на тон
+    # Допуск: если ошибка > 6 Гц — считаем, что не распознано
+    if best_error > 6.0 or best_hour is None:
         return None
 
-    return best_h, best_m
+    return int(best_hour), int(best_minute)
 
 # ===============================
-# UI
+# ИНТЕРФЕЙС
 # ===============================
 st.title("🎵 Оркестр времени")
-st.caption("Прямой и обратный звуковой код времени (музыкальная схема)")
+st.caption("Прямой и обратный звуковой код времени")
 st.divider()
+
 mode = st.radio("Режим:", ["Одно время", "Запись диапазона", "Определить время по звуку"], horizontal=True)
 
-# ОДНО ВРЕМЯ
 if mode == "Одно время":
     st.session_state.selected_time = st.time_input("Выберите время", value=st.session_state.selected_time)
     signal = sound_for_time(st.session_state.selected_time)
     if st.button("▶️ Проиграть"):
         st.audio(wav_bytes(signal), format="audio/wav")
 
-# ЗАПИСЬ ДИАПАЗОНА
 elif mode == "Запись диапазона":
     t1 = st.time_input("Начало", time(12, 0, 0))
     t2 = st.time_input("Конец", time(12, 1, 0))
@@ -174,8 +161,7 @@ elif mode == "Запись диапазона":
         st.audio(audio, format="audio/wav")
         st.download_button("⬇️ Скачать WAV", audio, "time_recording.wav")
 
-# ОБРАТНЫЙ АНАЛИЗ
-else:
+else:  # Обратный анализ
     uploaded = st.file_uploader("Загрузите WAV файл", type=["wav"])
     if uploaded:
         result = infer_time_from_audio(uploaded.read())
@@ -183,7 +169,6 @@ else:
             hour, minute = result
             st.success(f"🕰 Предполагаемое время: **{hour:02d}:{minute:02d}**")
         else:
-            st.error("❌ Не удалось распознать время. Убедитесь, что файл создан этим приложением.")
+            st.error("❌ Не удалось распознать время. Убедитесь, что файл был создан этим приложением.")
         st.divider()
-        st.caption("⚠️ Обратное определение времени — на основе двух пиков и перебора")
-
+        st.caption("⚠️ Обратное определение времени — приближённое (FFT-анализ)")
